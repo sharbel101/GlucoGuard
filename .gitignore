@@ -1,0 +1,19 @@
+# Connect IQ build artifacts
+bin/
+GlucoGuard/source/bin/
+GlucoGuard/source/gen/
+GlucoGuard/source/internal-mir/
+GlucoGuard/source/mir/
+GlucoGuard/source/*.prg
+GlucoGuard/source/*.prg.debug.xml
+
+# Local signing key
+GlucoGuard/developer_key
+
+# Local SDK and generated files
+connectiq-sdk-manager-windows/
+connectiq-sdk-manager-windows.zip
+WebView2Loader.dll
+
+# VS Code settings
+.vscode/

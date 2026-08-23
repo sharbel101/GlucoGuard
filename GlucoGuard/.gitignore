@@ -1,0 +1,11 @@
+# Connect IQ build artifacts
+bin/
+gen/
+internal-mir/
+external-mir/
+
+# Local signing key
+developer_key
+
+# VS Code settings
+.vscode/
