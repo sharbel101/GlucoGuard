@@ -17,7 +17,8 @@ class glucoguardApp extends Application.AppBase {
     }
 
     function getInitialView() as [Views] or [Views, InputDelegates] {
-        return [ new glucoguardView() ];
+        var view = new glucoguardView();
+        return [ view, new glucoguardInputDelegate(view) ];
     }
 
 }
