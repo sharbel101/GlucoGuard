@@ -20,14 +20,11 @@ class glucoguardView extends WatchUi.View {
     }
 
     function onShow() {
-        Sensor.setEnabledSensors([Sensor.SENSOR_HEARTRATE]);
-        Sensor.enableSensorEvents(method(:onSensorData));
     }
 
     function onHide() {
         stopSnapshotTimer();
-        Sensor.enableSensorEvents(null);
-        Sensor.setEnabledSensors([]);
+        stopHeartRateRead();
     }
 
     function startSnapshot() as Void {
@@ -35,6 +32,9 @@ class glucoguardView extends WatchUi.View {
         snapshotDone = false;
         snapshotStartTime = Time.now();
         snapshotSecondsRemaining = SNAPSHOT_DURATION_SEC;
+        heartRate = null;
+        Sensor.setEnabledSensors([Sensor.SENSOR_HEARTRATE]);
+        Sensor.enableSensorEvents(method(:onSensorData));
         snapshotTimer.start(method(:onSnapshotTick), 1000, true);
         WatchUi.requestUpdate();
     }
@@ -45,7 +45,14 @@ class glucoguardView extends WatchUi.View {
         snapshotDone = false;
         snapshotStartTime = null;
         snapshotSecondsRemaining = SNAPSHOT_DURATION_SEC;
+        heartRate = null;
+        stopHeartRateRead();
         WatchUi.requestUpdate();
+    }
+
+    function stopHeartRateRead() as Void {
+        Sensor.enableSensorEvents(null);
+        Sensor.setEnabledSensors([]);
     }
 
     function stopSnapshotTimer() as Void {
@@ -65,6 +72,8 @@ class glucoguardView extends WatchUi.View {
             snapshotActive = false;
             snapshotDone = true;
             stopSnapshotTimer();
+            heartRate = null;
+            stopHeartRateRead();
         }
 
         WatchUi.requestUpdate();
@@ -98,13 +107,28 @@ class glucoguardView extends WatchUi.View {
             stateText = "Done";
         }
 
+        var hrText = "";
+        if (snapshotActive) {
+            hrText = (heartRate == null) ? "-- BPM" : heartRate.toString() + " BPM";
+        }
+
         dc.drawText(
             dc.getWidth() / 2,
-            (dc.getHeight() / 2) - 20,
+            (dc.getHeight() / 2) - (snapshotActive ? 70 : 20),
             Graphics.FONT_LARGE,
             stateText,
             Graphics.TEXT_JUSTIFY_CENTER
         );
+
+        if (snapshotActive) {
+            dc.drawText(
+                dc.getWidth() / 2,
+                (dc.getHeight() / 2) - 5,
+                Graphics.FONT_SMALL,
+                hrText,
+                Graphics.TEXT_JUSTIFY_CENTER
+            );
+        }
 
         var actionText = "SELECT: Start";
         if (snapshotActive) {
@@ -113,7 +137,7 @@ class glucoguardView extends WatchUi.View {
 
         dc.drawText(
             dc.getWidth() / 2,
-            (dc.getHeight() / 2) + 30,
+            (dc.getHeight() / 2) + (snapshotActive ? 70 : 30),
             Graphics.FONT_SMALL,
             actionText,
             Graphics.TEXT_JUSTIFY_CENTER
@@ -121,6 +145,10 @@ class glucoguardView extends WatchUi.View {
     }
 
     function onSensorData(sensorInfo as Sensor.Info) as Void {
+        if (!snapshotActive) {
+            return;
+        }
+
         if (sensorInfo.heartRate != null) {
             heartRate = sensorInfo.heartRate;
         }
