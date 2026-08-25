@@ -179,11 +179,13 @@ class glucoguardView extends WatchUi.View {
 
     // Tapping CANCEL asks first rather than cancelling immediately.
     // confirmingCancel keeps onHide() from stopping the capture just
-    // because the dialog is now on top of this view.
+    // because the dialog is now on top of this view. Custom-drawn (not
+    // WatchUi.Confirmation) so it matches this app's own button styling
+    // per UI-GUIDE.md instead of the system's plain text prompt.
     function confirmCancelSnapshot() as Void {
         confirmingCancel = true;
-        var dialog = new WatchUi.Confirmation("Cancel scan?");
-        WatchUi.pushView(dialog, new glucoguardCancelConfirmDelegate(self), WatchUi.SLIDE_IMMEDIATE);
+        var dialog = new glucoguardCancelConfirmView();
+        WatchUi.pushView(dialog, new glucoguardCancelConfirmDelegate(self, dialog), WatchUi.SLIDE_IMMEDIATE);
     }
 
     // Called by glucoguardCancelConfirmDelegate once the user answers.
@@ -826,19 +828,115 @@ class glucoguardInputDelegate extends WatchUi.BehaviorDelegate {
     }
 }
 
-// Only reached from a precise tap on CANCEL (see onTap above) -- onResponse
-// tells the view whether to actually cancel.
-class glucoguardCancelConfirmDelegate extends WatchUi.ConfirmationDelegate {
+// Custom-drawn cancel-confirmation screen, styled like the rest of the app
+// (pill buttons, palette colours by consequence) instead of the system's
+// plain-text WatchUi.Confirmation. No ring/header -- this is a standalone
+// prompt, not one of the three capture states.
+class glucoguardCancelConfirmView extends WatchUi.View {
 
-    var view;
+    // Monkey C doesn't allow reaching into another class's const across
+    // files/classes (ClassName.CONST is not valid here), so this mirrors
+    // the handful of glucoguardView palette values this screen needs.
+    const C_BG     = 0x000000;
+    const C_TEXT   = 0xFFFFFF;
+    const C_LIVE   = 0x1E9BE9;
+    const C_DANGER = 0xE03131;
 
-    function initialize(viewToControl) {
-        ConfirmationDelegate.initialize();
-        view = viewToControl;
+    var resumeBounds = null;
+    var cancelBounds = null;
+
+    function initialize() {
+        View.initialize();
     }
 
-    function onResponse(response) {
-        view.resolveCancelConfirm(response == WatchUi.CONFIRM_YES);
-        return true;
+    function onUpdate(dc) as Void {
+        if (dc has :setAntiAlias) {
+            dc.setAntiAlias(true);
+        }
+
+        var w = dc.getWidth();
+        var h = dc.getHeight();
+        var cx = w / 2;
+
+        dc.setColor(C_TEXT, C_BG);
+        dc.clear();
+
+        dc.setColor(C_TEXT, Graphics.COLOR_TRANSPARENT);
+        dc.drawText(
+            cx, (h * 0.30).toNumber(), Graphics.FONT_MEDIUM, "Cancel scan?",
+            Graphics.TEXT_JUSTIFY_CENTER | Graphics.TEXT_JUSTIFY_VCENTER
+        );
+
+        var pillW = (w * 0.62).toNumber();
+        var pillH = (h * 0.115).toNumber();
+        var gap = (h * 0.03).toNumber();
+        var y1 = (h * 0.52).toNumber();
+        var y2 = y1 + pillH + gap;
+
+        // Safe choice first/above -- resuming the capture, coloured like the
+        // live-capture ring so it reads as "keep going". Destructive choice
+        // below in C_DANGER, same red as the CANCEL button that led here.
+        resumeBounds = drawPill(dc, cx, y1, pillW, pillH, "RESUME", C_LIVE, C_BG);
+        cancelBounds = drawPill(dc, cx, y2, pillW, pillH, "CANCEL", C_DANGER, C_TEXT);
+    }
+
+    // Mirrors glucoguardView.drawActionButton()'s pill shape (radius =
+    // height / 2) so this screen matches the rest of the app. Returns the
+    // drawn rect for hit-testing since this view has two buttons, not one.
+    function drawPill(dc, cx, centerY, w, h, label, fillColor, labelColor) {
+        var x = cx - (w / 2);
+        var y = centerY - (h / 2);
+
+        dc.setColor(fillColor, Graphics.COLOR_TRANSPARENT);
+        dc.fillRoundedRectangle(x, y, w, h, h / 2);
+
+        dc.setColor(labelColor, Graphics.COLOR_TRANSPARENT);
+        dc.drawText(
+            cx, centerY, Graphics.FONT_SMALL, label,
+            Graphics.TEXT_JUSTIFY_CENTER | Graphics.TEXT_JUSTIFY_VCENTER
+        );
+
+        return [x, y, w, h];
+    }
+
+    function hitTest(bounds, x, y) as Boolean {
+        if (bounds == null) {
+            return false;
+        }
+        return x >= bounds[0] && x <= bounds[0] + bounds[2]
+            && y >= bounds[1] && y <= bounds[1] + bounds[3];
+    }
+}
+
+// Only reached from a precise tap on CANCEL on the main view (see onTap
+// above) -- hit-tests the two pill buttons drawn by glucoguardCancelConfirmView
+// and tells the main view whether to actually cancel.
+class glucoguardCancelConfirmDelegate extends WatchUi.InputDelegate {
+
+    var view;
+    var dialog;
+
+    function initialize(viewToControl, dialogView) {
+        InputDelegate.initialize();
+        view = viewToControl;
+        dialog = dialogView;
+    }
+
+    function onTap(clickEvent) {
+        var coordinates = clickEvent.getCoordinates();
+        var x = coordinates[0];
+        var y = coordinates[1];
+
+        if (dialog.hitTest(dialog.resumeBounds, x, y)) {
+            WatchUi.popView(WatchUi.SLIDE_IMMEDIATE);
+            view.resolveCancelConfirm(false);
+            return true;
+        }
+        if (dialog.hitTest(dialog.cancelBounds, x, y)) {
+            WatchUi.popView(WatchUi.SLIDE_IMMEDIATE);
+            view.resolveCancelConfirm(true);
+            return true;
+        }
+        return false;
     }
 }
