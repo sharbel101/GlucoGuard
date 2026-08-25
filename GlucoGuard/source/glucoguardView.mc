@@ -13,7 +13,7 @@ class glucoguardView extends WatchUi.View {
     // ------------------------------------------------------------------
     // Capture configuration (unchanged)
     // ------------------------------------------------------------------
-    const SNAPSHOT_DURATION_SEC = 240;
+    const SNAPSHOT_DURATION_SEC = 30; // kept at 30s for testing, per request -- not reverted
     const HR_BUFFER_INTERVAL_SEC = 4;
     const HR_BUFFER_MAX = 90;
     // Safety ceiling only -- a 4-minute snapshot produces ~240-500 beats,
@@ -59,6 +59,10 @@ class glucoguardView extends WatchUi.View {
     // be null -- ActivityMonitor.Info fields are nullable on some devices.
     var moveBarAtStart = null;
     var stepsAtStart = null;
+    // True while the cancel confirmation dialog is on top of this view --
+    // onHide() checks this so pushing that dialog doesn't tear down the
+    // in-progress capture underneath it.
+    var confirmingCancel = false;
 
     // Hit box of the on-screen action button as [x, y, w, h]. Refreshed on
     // every draw so the input delegate never has to re-derive the layout.
@@ -73,6 +77,13 @@ class glucoguardView extends WatchUi.View {
     }
 
     function onHide() {
+        // Pushing the cancel confirmation dialog also hides this view --
+        // don't tear down the capture just because the dialog is on top;
+        // only a confirmed cancel (cancelSnapshot(), called separately)
+        // should do that.
+        if (confirmingCancel) {
+            return;
+        }
         stopSnapshotTimer();
         stopHeartRateRead();
     }
@@ -158,14 +169,28 @@ class glucoguardView extends WatchUi.View {
         WatchUi.requestUpdate();
     }
 
-    // FIX: the old version was `else if (!snapshotDone)`, which meant the
-    // button drawn in the completed state ("AGAIN") did nothing at all.
-    // startSnapshot() already clears snapshotDone, so a plain else is correct.
+    // Starting/restarting only -- cancelling always goes through
+    // confirmCancelSnapshot() below instead (input delegate decides which
+    // one to call). startSnapshot() already clears snapshotDone, so a plain
+    // call works the same from READY or DONE.
     function handlePrimaryAction() as Void {
-        if (snapshotActive) {
+        startSnapshot();
+    }
+
+    // Tapping CANCEL asks first rather than cancelling immediately.
+    // confirmingCancel keeps onHide() from stopping the capture just
+    // because the dialog is now on top of this view.
+    function confirmCancelSnapshot() as Void {
+        confirmingCancel = true;
+        var dialog = new WatchUi.Confirmation("Cancel scan?");
+        WatchUi.pushView(dialog, new glucoguardCancelConfirmDelegate(self), WatchUi.SLIDE_IMMEDIATE);
+    }
+
+    // Called by glucoguardCancelConfirmDelegate once the user answers.
+    function resolveCancelConfirm(confirmed as Boolean) as Void {
+        confirmingCancel = false;
+        if (confirmed) {
             cancelSnapshot();
-        } else {
-            startSnapshot();
         }
     }
 
@@ -279,12 +304,16 @@ class glucoguardView extends WatchUi.View {
     }
 
     // Display-only for now, for testing Step 8 -- no risk-score integration.
+    // Kept short (not the longer "recently active"/"sedentary" wording) --
+    // this row sits low in drawDoneState's band, where the circular screen
+    // is narrower than at centre, so a long string here is what was
+    // clipping into the ring.
     function formatMoveBar() {
         if (moveBarAtStart == null) {
-            return "Move bar: --";
+            return "Move: --";
         }
-        var label = (computeRecentlyActive() == 1) ? "recently active" : "sedentary";
-        return "Move bar: " + moveBarAtStart.toString() + " (" + label + ")";
+        var label = (computeRecentlyActive() == 1) ? "active" : "still";
+        return "Move: " + moveBarAtStart.toString() + " (" + label + ")";
     }
 
     function validSampleCount() {
@@ -557,8 +586,17 @@ class glucoguardView extends WatchUi.View {
         // watch renders a black bezel of roughly 20px OUTSIDE getWidth(), so
         // there is always some apparent margin that cannot be drawn into --
         // padding here only adds to it. Keep edgePad near zero.
+        //
+        // penWidth alone controls both "how thick" and "how large" the ring
+        // reads as: outer edge = shorter/2 - edgePad, independent of
+        // penWidth, so edgePad is what's actually near the true screen edge
+        // (already ~2px, per UI-GUIDE.md's measured 193-of-195 finding) and
+        // is deliberately left alone. Shrinking penWidth instead grows the
+        // radius (the ring's centreline) while the outer edge stays fixed,
+        // which is what makes it read as thinner and a size larger, and
+        // frees up interior width for content.
         var shorter = (w < h) ? w : h;
-        var penWidth = (w * 0.042).toNumber();
+        var penWidth = (w * 0.028).toNumber();
         var edgePad = (w * 0.006).toNumber();
         var radius = (shorter / 2) - edgePad - (penWidth / 2);
 
@@ -755,21 +793,52 @@ class glucoguardInputDelegate extends WatchUi.BehaviorDelegate {
         view = viewToControl;
     }
 
+    // BehaviorDelegate dispatch rule (Toybox.WatchUi.BehaviorDelegate docs):
+    // a tap is offered to onSelect() first, and if onSelect() returns true,
+    // the matching InputDelegate.onTap() for that same tap is never called
+    // at all. That's why an unconditional onSelect() that always returned
+    // true made onTap()'s button hit-testing dead code below -- it never
+    // ran, for any tap, ever.
+    //
+    // So: while not active, onSelect() handles the tap itself and returns
+    // true -- this is "press anywhere to start", unchanged from before.
+    // While active, onSelect() returns false instead, declining to consume
+    // the tap so it falls through to onTap(), which has real coordinates
+    // and can require a precise hit on CANCEL before anything happens.
     function onSelect() {
+        if (view.snapshotActive) {
+            return false;
+        }
         view.handlePrimaryAction();
         return true;
     }
 
-    // The old version re-derived the button box from view.getWidth() /
-    // view.getHeight(), which are Dc methods, not View methods. The view now
-    // caches the box it actually drew, so the hit area can never drift from
-    // the button.
+    // Only reachable for a tap while a snapshot is active (see onSelect()
+    // above) -- a precise hit on CANCEL asks for confirmation instead of
+    // cancelling immediately; anywhere else is ignored.
     function onTap(clickEvent) {
         var coordinates = clickEvent.getCoordinates();
-        if (view.hitTestPrimaryAction(coordinates[0], coordinates[1])) {
-            view.handlePrimaryAction();
-            return true;
+        if (!view.hitTestPrimaryAction(coordinates[0], coordinates[1])) {
+            return false;
         }
-        return false;
+        view.confirmCancelSnapshot();
+        return true;
+    }
+}
+
+// Only reached from a precise tap on CANCEL (see onTap above) -- onResponse
+// tells the view whether to actually cancel.
+class glucoguardCancelConfirmDelegate extends WatchUi.ConfirmationDelegate {
+
+    var view;
+
+    function initialize(viewToControl) {
+        ConfirmationDelegate.initialize();
+        view = viewToControl;
+    }
+
+    function onResponse(response) {
+        view.resolveCancelConfirm(response == WatchUi.CONFIRM_YES);
+        return true;
     }
 }
