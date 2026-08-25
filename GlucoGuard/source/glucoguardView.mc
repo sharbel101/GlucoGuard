@@ -3,6 +3,7 @@ import Toybox.Graphics;
 import Toybox.Lang;
 import Toybox.Math;
 import Toybox.Sensor;
+import Toybox.SensorHistory;
 import Toybox.System;
 import Toybox.Time;
 import Toybox.Timer;
@@ -59,6 +60,13 @@ class glucoguardView extends WatchUi.View {
     // be null -- ActivityMonitor.Info fields are nullable on some devices.
     var moveBarAtStart = null;
     var stepsAtStart = null;
+    // Latest SensorHistory sample as of snapshot completion (not a stream --
+    // fetched once in onSnapshotTick()'s completion branch). Raw numbers
+    // only, no formula yet -- device support for each varies independently,
+    // hence three separate nulls rather than one.
+    var spo2AtEnd = null;
+    var stressAtEnd = null;
+    var bodyBatteryAtEnd = null;
     // True while the cancel confirmation dialog is on top of this view --
     // onHide() checks this so pushing that dialog doesn't tear down the
     // in-progress capture underneath it.
@@ -100,6 +108,9 @@ class glucoguardView extends WatchUi.View {
         heartRate = null;
         hrBuffer = [];
         rrBuffer = [];
+        spo2AtEnd = null;
+        stressAtEnd = null;
+        bodyBatteryAtEnd = null;
         Sensor.setEnabledSensors([Sensor.SENSOR_HEARTRATE]);
         Sensor.enableSensorEvents(method(:onSensorData));
         // :period is required by registerSensorDataListener (max 4s) --
@@ -164,9 +175,33 @@ class glucoguardView extends WatchUi.View {
             stopSnapshotTimer();
             heartRate = null;
             stopHeartRateRead();
+            fetchVitalsAtEnd();
         }
 
         WatchUi.requestUpdate();
+    }
+
+    // Step 9: raw numbers only, no formula. Each getter is guarded and
+    // null-checked independently -- device support for SpO2/stress/body
+    // battery varies per-device and sometimes per-moment (e.g. no reading
+    // yet today), so one missing metric must not blank out the others.
+    function fetchVitalsAtEnd() as Void {
+        var options = { :period => null, :order => SensorHistory.ORDER_NEWEST_FIRST };
+
+        if ((Toybox has :SensorHistory) && (Toybox.SensorHistory has :getOxygenSaturationHistory)) {
+            var sample = SensorHistory.getOxygenSaturationHistory(options).next();
+            spo2AtEnd = (sample == null) ? null : sample.data;
+        }
+
+        if ((Toybox has :SensorHistory) && (Toybox.SensorHistory has :getStressHistory)) {
+            var sample = SensorHistory.getStressHistory(options).next();
+            stressAtEnd = (sample == null) ? null : sample.data;
+        }
+
+        if ((Toybox has :SensorHistory) && (Toybox.SensorHistory has :getBodyBatteryHistory)) {
+            var sample = SensorHistory.getBodyBatteryHistory(options).next();
+            bodyBatteryAtEnd = (sample == null) ? null : sample.data;
+        }
     }
 
     // Starting/restarting only -- cancelling always goes through
@@ -316,6 +351,17 @@ class glucoguardView extends WatchUi.View {
         }
         var label = (computeRecentlyActive() == 1) ? "active" : "still";
         return "Move: " + moveBarAtStart.toString() + " (" + label + ")";
+    }
+
+    // Step 9: raw display only, no formula. One combined row rather than
+    // three separate ones -- this screen is already tight on vertical
+    // budget (see the tiered fallback in drawDoneState), and three short
+    // labels fit comfortably on one line without wrapping.
+    function formatVitals() {
+        var o2Text = (spo2AtEnd == null) ? "--" : (spo2AtEnd.format("%.0f") + "%");
+        var stressText = (stressAtEnd == null) ? "--" : stressAtEnd.format("%.0f");
+        var bbText = (bodyBatteryAtEnd == null) ? "--" : bodyBatteryAtEnd.format("%.0f");
+        return "O2 " + o2Text + "  STR " + stressText + "  BB " + bbText;
     }
 
     function validSampleCount() {
@@ -722,23 +768,35 @@ class glucoguardView extends WatchUi.View {
                            Graphics.FONT_LARGE, Graphics.FONT_MEDIUM];
 
         // Same overflow escape hatch drawCapturingState uses for its countdown
-        // row. fitHeroFont's own fallback just returns the smallest candidate
-        // even when it doesn't fit, so with 5 rows to stack (hero + AVG BPM +
-        // trend + RMSSD + move bar) this band can run out of room with no
-        // warning -- the last row lands under the button and gets silently
-        // painted over, since the button is drawn last. Drop the trend row
-        // when that happens (it only repeats what was already shown live
-        // during capture) so RMSSD and the move-bar debug line -- Step 7 and
-        // 8's actual deliverables -- always have room.
+        // row, now two-tiered. fitHeroFont's own fallback just returns the
+        // smallest candidate even when it doesn't fit, so with 6 rows to
+        // stack (hero + AVG BPM + trend + RMSSD + move bar + vitals) this
+        // band can run out of room with no warning -- the last row lands
+        // under the button and gets silently painted over, since the button
+        // is drawn last. Drop the trend row first (it only repeats what was
+        // already shown live during capture); if that alone still doesn't
+        // fit, drop the move-bar debug line too. RMSSD and the new vitals
+        // row -- Step 7 and 9's actual deliverables -- always have room.
         var showTrend = true;
-        var heroFont = fitHeroFont(dc, bandHeight, [lineHeight, lineHeight, lineHeight, lineHeight], gap, candidates);
-        if (dc.getFontHeight(heroFont) + (lineHeight * 4) + (gap * 4) > bandHeight) {
+        var showMoveBar = true;
+        var heroFont = fitHeroFont(dc, bandHeight, [lineHeight, lineHeight, lineHeight, lineHeight, lineHeight], gap, candidates);
+        if (dc.getFontHeight(heroFont) + (lineHeight * 5) + (gap * 5) > bandHeight) {
             showTrend = false;
-            heroFont = fitHeroFont(dc, bandHeight, [lineHeight, lineHeight, lineHeight], gap, candidates);
+            heroFont = fitHeroFont(dc, bandHeight, [lineHeight, lineHeight, lineHeight, lineHeight], gap, candidates);
+            if (dc.getFontHeight(heroFont) + (lineHeight * 4) + (gap * 4) > bandHeight) {
+                showMoveBar = false;
+                heroFont = fitHeroFont(dc, bandHeight, [lineHeight, lineHeight, lineHeight], gap, candidates);
+            }
         }
 
         var rows;
         if (showTrend) {
+            rows = stackCenters(
+                bandTop, bandBottom,
+                [dc.getFontHeight(heroFont), lineHeight, lineHeight, lineHeight, lineHeight, lineHeight],
+                gap
+            );
+        } else if (showMoveBar) {
             rows = stackCenters(
                 bandTop, bandBottom,
                 [dc.getFontHeight(heroFont), lineHeight, lineHeight, lineHeight, lineHeight],
@@ -756,6 +814,7 @@ class glucoguardView extends WatchUi.View {
         var averageText = (average == null) ? "--" : average.toString();
         var rmssdText = formatRmssd(computeRmssd());
         var moveBarText = formatMoveBar();
+        var vitalsText = formatVitals();
 
         drawCenteredText(dc, cx, rows[0], heroFont, averageText, C_TEXT);
         drawCenteredText(dc, cx, rows[1], Graphics.FONT_XTINY, "AVG BPM", C_MUTED);
@@ -763,9 +822,14 @@ class glucoguardView extends WatchUi.View {
             drawTrendRow(dc, w, rows[2], computeHrSlope());
             drawCenteredText(dc, cx, rows[3], Graphics.FONT_XTINY, rmssdText, C_MUTED);
             drawCenteredText(dc, cx, rows[4], Graphics.FONT_XTINY, moveBarText, C_MUTED);
-        } else {
+            drawCenteredText(dc, cx, rows[5], Graphics.FONT_XTINY, vitalsText, C_MUTED);
+        } else if (showMoveBar) {
             drawCenteredText(dc, cx, rows[2], Graphics.FONT_XTINY, rmssdText, C_MUTED);
             drawCenteredText(dc, cx, rows[3], Graphics.FONT_XTINY, moveBarText, C_MUTED);
+            drawCenteredText(dc, cx, rows[4], Graphics.FONT_XTINY, vitalsText, C_MUTED);
+        } else {
+            drawCenteredText(dc, cx, rows[2], Graphics.FONT_XTINY, rmssdText, C_MUTED);
+            drawCenteredText(dc, cx, rows[3], Graphics.FONT_XTINY, vitalsText, C_MUTED);
         }
 
         drawActionButton(dc, w, h, "AGAIN", C_DONE, C_BG);
