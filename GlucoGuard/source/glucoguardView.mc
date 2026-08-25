@@ -86,7 +86,13 @@ class glucoguardView extends WatchUi.View {
         rrBuffer = [];
         Sensor.setEnabledSensors([Sensor.SENSOR_HEARTRATE]);
         Sensor.enableSensorEvents(method(:onSensorData));
-        var rrOptions = { :heartBeatIntervals => { :enabled => true } };
+        // :period is required by registerSensorDataListener (max 4s) --
+        // missing it throws "Missing :period field in options" and crashes
+        // the app on the very first tap, before any capture starts.
+        var rrOptions = {
+            :period => 1,
+            :heartBeatIntervals => { :enabled => true }
+        };
         Sensor.registerSensorDataListener(method(:onRawSensorData), rrOptions);
         snapshotTimer.start(method(:onSnapshotTick), 1000, true);
         WatchUi.requestUpdate();
@@ -638,29 +644,56 @@ class glucoguardView extends WatchUi.View {
 
         var bandTop = drawHeader(dc, w, h, "SCAN COMPLETE", C_DONE) + (h * 0.024).toNumber();
         var bandBottom = buttonRect(w, h)[1] - (h * 0.024).toNumber();
+        var bandHeight = bandBottom - bandTop;
 
         var lineHeight = dc.getFontHeight(Graphics.FONT_XTINY);
         var gap = (h * 0.024).toNumber();
+        var candidates = [Graphics.FONT_NUMBER_MEDIUM, Graphics.FONT_NUMBER_MILD,
+                           Graphics.FONT_LARGE, Graphics.FONT_MEDIUM];
 
-        var heroFont = fitHeroFont(
-            dc, bandBottom - bandTop, [lineHeight, lineHeight, lineHeight], gap,
-            [Graphics.FONT_NUMBER_MEDIUM, Graphics.FONT_NUMBER_MILD,
-             Graphics.FONT_LARGE, Graphics.FONT_MEDIUM]
-        );
+        // Same overflow escape hatch drawCapturingState uses for its countdown
+        // row. fitHeroFont's own fallback just returns the smallest candidate
+        // even when it doesn't fit, so with 4 rows to stack (hero + AVG BPM +
+        // trend + RMSSD) this band can run out of room with no warning -- the
+        // last row lands under the button and gets silently painted over,
+        // since the button is drawn last. Drop the trend row when that
+        // happens (it only repeats what was already shown live during
+        // capture) so the RMSSD line -- the actual point of this screen --
+        // always has room.
+        var showTrend = true;
+        var heroFont = fitHeroFont(dc, bandHeight, [lineHeight, lineHeight, lineHeight], gap, candidates);
+        if (dc.getFontHeight(heroFont) + (lineHeight * 3) + (gap * 3) > bandHeight) {
+            showTrend = false;
+            heroFont = fitHeroFont(dc, bandHeight, [lineHeight, lineHeight], gap, candidates);
+        }
 
-        var rows = stackCenters(
-            bandTop, bandBottom,
-            [dc.getFontHeight(heroFont), lineHeight, lineHeight, lineHeight],
-            gap
-        );
+        var rows;
+        if (showTrend) {
+            rows = stackCenters(
+                bandTop, bandBottom,
+                [dc.getFontHeight(heroFont), lineHeight, lineHeight, lineHeight],
+                gap
+            );
+        } else {
+            rows = stackCenters(
+                bandTop, bandBottom,
+                [dc.getFontHeight(heroFont), lineHeight, lineHeight],
+                gap
+            );
+        }
 
         var average = averageHr();
         var averageText = (average == null) ? "--" : average.toString();
+        var rmssdText = formatRmssd(computeRmssd());
 
         drawCenteredText(dc, cx, rows[0], heroFont, averageText, C_TEXT);
         drawCenteredText(dc, cx, rows[1], Graphics.FONT_XTINY, "AVG BPM", C_MUTED);
-        drawTrendRow(dc, w, rows[2], computeHrSlope());
-        drawCenteredText(dc, cx, rows[3], Graphics.FONT_XTINY, formatRmssd(computeRmssd()), C_MUTED);
+        if (showTrend) {
+            drawTrendRow(dc, w, rows[2], computeHrSlope());
+            drawCenteredText(dc, cx, rows[3], Graphics.FONT_XTINY, rmssdText, C_MUTED);
+        } else {
+            drawCenteredText(dc, cx, rows[2], Graphics.FONT_XTINY, rmssdText, C_MUTED);
+        }
 
         drawActionButton(dc, w, h, "AGAIN", C_DONE, C_BG);
     }
