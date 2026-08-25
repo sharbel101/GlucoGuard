@@ -1,7 +1,6 @@
 import Toybox.Graphics;
 import Toybox.Lang;
 import Toybox.Sensor;
-import Toybox.System;
 import Toybox.Time;
 import Toybox.Timer;
 import Toybox.WatchUi;
@@ -78,8 +77,6 @@ class glucoguardView extends WatchUi.View {
         hrBuffer = [];
         Sensor.setEnabledSensors([Sensor.SENSOR_HEARTRATE]);
         Sensor.enableSensorEvents(method(:onSensorData));
-        var sensorOptions = { :heartBeatIntervals => { :enabled => true } };
-        Sensor.registerSensorDataListener(method(:onSensorData), sensorOptions);
         snapshotTimer.start(method(:onSnapshotTick), 1000, true);
         WatchUi.requestUpdate();
     }
@@ -98,7 +95,6 @@ class glucoguardView extends WatchUi.View {
     function stopHeartRateRead() as Void {
         Sensor.enableSensorEvents(null);
         Sensor.setEnabledSensors([]);
-        Sensor.unregisterSensorDataListener();
     }
 
     function stopSnapshotTimer() as Void {
@@ -142,21 +138,13 @@ class glucoguardView extends WatchUi.View {
         }
     }
 
-    function onSensorData(sensorData) as Void {
+    function onSensorData(sensorInfo as Sensor.Info) as Void {
         if (!snapshotActive) {
             return;
         }
 
-        if (sensorData.heartRate != null) {
-            heartRate = sensorData.heartRate;
-        }
-
-        if (sensorData.heartRateData != null) {
-            System.println("HR Data: " + sensorData.heartRateData.toString());
-            if (sensorData.heartRateData.heartBeatIntervals != null) {
-                var intervals = sensorData.heartRateData.heartBeatIntervals;
-                System.println("HRV Beat-to-beat intervals: " + intervals.toString());
-            }
+        if (sensorInfo.heartRate != null) {
+            heartRate = sensorInfo.heartRate;
         }
 
         WatchUi.requestUpdate();
