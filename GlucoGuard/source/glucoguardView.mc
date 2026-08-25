@@ -1,3 +1,4 @@
+import Toybox.ActivityMonitor;
 import Toybox.Graphics;
 import Toybox.Lang;
 import Toybox.Math;
@@ -54,6 +55,10 @@ class glucoguardView extends WatchUi.View {
     // Raw beat-to-beat intervals (ms) for the current snapshot only --
     // separate from hrBuffer, no RMSSD math applied here yet.
     var rrBuffer = [];
+    // Recent-movement signal, read once at Start (not a stream). Both can
+    // be null -- ActivityMonitor.Info fields are nullable on some devices.
+    var moveBarAtStart = null;
+    var stepsAtStart = null;
 
     // Hit box of the on-screen action button as [x, y, w, h]. Refreshed on
     // every draw so the input delegate never has to re-derive the layout.
@@ -94,6 +99,14 @@ class glucoguardView extends WatchUi.View {
             :heartBeatIntervals => { :enabled => true }
         };
         Sensor.registerSensorDataListener(method(:onRawSensorData), rrOptions);
+
+        // Single one-shot read, not a stream -- no accelerometer, no
+        // background work. ActivityMonitor.Info's fields are nullable on
+        // some devices, so both are null-checked before use.
+        var activityInfo = ActivityMonitor.getInfo();
+        moveBarAtStart = activityInfo.moveBarLevel;
+        stepsAtStart = activityInfo.steps;
+
         snapshotTimer.start(method(:onSnapshotTick), 1000, true);
         WatchUi.requestUpdate();
     }
@@ -255,6 +268,23 @@ class glucoguardView extends WatchUi.View {
             return "HRV (RMSSD): -- ms";
         }
         return "HRV (RMSSD): " + rmssd.format("%.0f") + " ms";
+    }
+
+    // Garmin doesn't publish the exact time window moveBarLevel reflects, so
+    // this is a coarse recently-active-vs-sedentary signal, not a precise
+    // step count over a fixed window. 1 = recently active, 0 = sedentary/
+    // unknown.
+    function computeRecentlyActive() {
+        return (moveBarAtStart != null && moveBarAtStart <= 1) ? 1 : 0;
+    }
+
+    // Display-only for now, for testing Step 8 -- no risk-score integration.
+    function formatMoveBar() {
+        if (moveBarAtStart == null) {
+            return "Move bar: --";
+        }
+        var label = (computeRecentlyActive() == 1) ? "recently active" : "sedentary";
+        return "Move bar: " + moveBarAtStart.toString() + " (" + label + ")";
     }
 
     function validSampleCount() {
@@ -653,31 +683,31 @@ class glucoguardView extends WatchUi.View {
 
         // Same overflow escape hatch drawCapturingState uses for its countdown
         // row. fitHeroFont's own fallback just returns the smallest candidate
-        // even when it doesn't fit, so with 4 rows to stack (hero + AVG BPM +
-        // trend + RMSSD) this band can run out of room with no warning -- the
-        // last row lands under the button and gets silently painted over,
-        // since the button is drawn last. Drop the trend row when that
-        // happens (it only repeats what was already shown live during
-        // capture) so the RMSSD line -- the actual point of this screen --
-        // always has room.
+        // even when it doesn't fit, so with 5 rows to stack (hero + AVG BPM +
+        // trend + RMSSD + move bar) this band can run out of room with no
+        // warning -- the last row lands under the button and gets silently
+        // painted over, since the button is drawn last. Drop the trend row
+        // when that happens (it only repeats what was already shown live
+        // during capture) so RMSSD and the move-bar debug line -- Step 7 and
+        // 8's actual deliverables -- always have room.
         var showTrend = true;
-        var heroFont = fitHeroFont(dc, bandHeight, [lineHeight, lineHeight, lineHeight], gap, candidates);
-        if (dc.getFontHeight(heroFont) + (lineHeight * 3) + (gap * 3) > bandHeight) {
+        var heroFont = fitHeroFont(dc, bandHeight, [lineHeight, lineHeight, lineHeight, lineHeight], gap, candidates);
+        if (dc.getFontHeight(heroFont) + (lineHeight * 4) + (gap * 4) > bandHeight) {
             showTrend = false;
-            heroFont = fitHeroFont(dc, bandHeight, [lineHeight, lineHeight], gap, candidates);
+            heroFont = fitHeroFont(dc, bandHeight, [lineHeight, lineHeight, lineHeight], gap, candidates);
         }
 
         var rows;
         if (showTrend) {
             rows = stackCenters(
                 bandTop, bandBottom,
-                [dc.getFontHeight(heroFont), lineHeight, lineHeight, lineHeight],
+                [dc.getFontHeight(heroFont), lineHeight, lineHeight, lineHeight, lineHeight],
                 gap
             );
         } else {
             rows = stackCenters(
                 bandTop, bandBottom,
-                [dc.getFontHeight(heroFont), lineHeight, lineHeight],
+                [dc.getFontHeight(heroFont), lineHeight, lineHeight, lineHeight],
                 gap
             );
         }
@@ -685,14 +715,17 @@ class glucoguardView extends WatchUi.View {
         var average = averageHr();
         var averageText = (average == null) ? "--" : average.toString();
         var rmssdText = formatRmssd(computeRmssd());
+        var moveBarText = formatMoveBar();
 
         drawCenteredText(dc, cx, rows[0], heroFont, averageText, C_TEXT);
         drawCenteredText(dc, cx, rows[1], Graphics.FONT_XTINY, "AVG BPM", C_MUTED);
         if (showTrend) {
             drawTrendRow(dc, w, rows[2], computeHrSlope());
             drawCenteredText(dc, cx, rows[3], Graphics.FONT_XTINY, rmssdText, C_MUTED);
+            drawCenteredText(dc, cx, rows[4], Graphics.FONT_XTINY, moveBarText, C_MUTED);
         } else {
             drawCenteredText(dc, cx, rows[2], Graphics.FONT_XTINY, rmssdText, C_MUTED);
+            drawCenteredText(dc, cx, rows[3], Graphics.FONT_XTINY, moveBarText, C_MUTED);
         }
 
         drawActionButton(dc, w, h, "AGAIN", C_DONE, C_BG);
