@@ -1,6 +1,8 @@
 import Toybox.Graphics;
 import Toybox.Lang;
+import Toybox.Math;
 import Toybox.Sensor;
+import Toybox.System;
 import Toybox.Time;
 import Toybox.Timer;
 import Toybox.WatchUi;
@@ -13,6 +15,9 @@ class glucoguardView extends WatchUi.View {
     const SNAPSHOT_DURATION_SEC = 240;
     const HR_BUFFER_INTERVAL_SEC = 4;
     const HR_BUFFER_MAX = 90;
+    // Safety ceiling only -- a 4-minute snapshot produces ~240-500 beats,
+    // so this should never realistically be hit. No FIFO eviction.
+    const RR_BUFFER_MAX = 500;
 
     // ------------------------------------------------------------------
     // Palette
@@ -46,6 +51,9 @@ class glucoguardView extends WatchUi.View {
     var snapshotDone = false;
     var snapshotTimer = null;
     var hrBuffer = [];
+    // Raw beat-to-beat intervals (ms) for the current snapshot only --
+    // separate from hrBuffer, no RMSSD math applied here yet.
+    var rrBuffer = [];
 
     // Hit box of the on-screen action button as [x, y, w, h]. Refreshed on
     // every draw so the input delegate never has to re-derive the layout.
@@ -75,8 +83,11 @@ class glucoguardView extends WatchUi.View {
         snapshotSecondsRemaining = SNAPSHOT_DURATION_SEC;
         heartRate = null;
         hrBuffer = [];
+        rrBuffer = [];
         Sensor.setEnabledSensors([Sensor.SENSOR_HEARTRATE]);
         Sensor.enableSensorEvents(method(:onSensorData));
+        var rrOptions = { :heartBeatIntervals => { :enabled => true } };
+        Sensor.registerSensorDataListener(method(:onRawSensorData), rrOptions);
         snapshotTimer.start(method(:onSnapshotTick), 1000, true);
         WatchUi.requestUpdate();
     }
@@ -95,6 +106,7 @@ class glucoguardView extends WatchUi.View {
     function stopHeartRateRead() as Void {
         Sensor.enableSensorEvents(null);
         Sensor.setEnabledSensors([]);
+        Sensor.unregisterSensorDataListener();
     }
 
     function stopSnapshotTimer() as Void {
@@ -150,6 +162,31 @@ class glucoguardView extends WatchUi.View {
         WatchUi.requestUpdate();
     }
 
+    // Raw beat-to-beat intervals for HRV, delivered separately from
+    // onSensorData's periodic Sensor.Info. Buffers into rrBuffer for the
+    // current snapshot -- no RMSSD math here yet.
+    function onRawSensorData(sensorData as Sensor.SensorData) as Void {
+        if (!snapshotActive) {
+            return;
+        }
+
+        if (sensorData.heartRateData == null) {
+            return;
+        }
+
+        var intervals = sensorData.heartRateData.heartBeatIntervals;
+        if (intervals != null) {
+            System.println("RR intervals (ms): " + intervals.toString());
+
+            for (var i = 0; i < intervals.size(); i += 1) {
+                if (rrBuffer.size() >= RR_BUFFER_MAX) {
+                    break;
+                }
+                rrBuffer.add(intervals[i]);
+            }
+        }
+    }
+
     // ==================================================================
     // Derived values
     // ==================================================================
@@ -188,6 +225,30 @@ class glucoguardView extends WatchUi.View {
             return null;
         }
         return sum / count;
+    }
+
+    // RMSSD over the raw beat-to-beat buffer: root mean square of successive
+    // differences. Needs at least 2 intervals to form one pair.
+    function computeRmssd() {
+        if (rrBuffer.size() < 2) {
+            return null;
+        }
+
+        var pairCount = rrBuffer.size() - 1;
+        var sumSquaredDiffs = 0.0;
+        for (var i = 0; i < pairCount; i += 1) {
+            var diff = rrBuffer[i + 1] - rrBuffer[i];
+            sumSquaredDiffs += diff * diff;
+        }
+
+        return Math.sqrt(sumSquaredDiffs / pairCount);
+    }
+
+    function formatRmssd(rmssd) {
+        if (rmssd == null) {
+            return "HRV (RMSSD): -- ms";
+        }
+        return "HRV (RMSSD): " + rmssd.format("%.0f") + " ms";
     }
 
     function validSampleCount() {
@@ -582,14 +643,14 @@ class glucoguardView extends WatchUi.View {
         var gap = (h * 0.024).toNumber();
 
         var heroFont = fitHeroFont(
-            dc, bandBottom - bandTop, [lineHeight, lineHeight], gap,
+            dc, bandBottom - bandTop, [lineHeight, lineHeight, lineHeight], gap,
             [Graphics.FONT_NUMBER_MEDIUM, Graphics.FONT_NUMBER_MILD,
              Graphics.FONT_LARGE, Graphics.FONT_MEDIUM]
         );
 
         var rows = stackCenters(
             bandTop, bandBottom,
-            [dc.getFontHeight(heroFont), lineHeight, lineHeight],
+            [dc.getFontHeight(heroFont), lineHeight, lineHeight, lineHeight],
             gap
         );
 
@@ -599,6 +660,7 @@ class glucoguardView extends WatchUi.View {
         drawCenteredText(dc, cx, rows[0], heroFont, averageText, C_TEXT);
         drawCenteredText(dc, cx, rows[1], Graphics.FONT_XTINY, "AVG BPM", C_MUTED);
         drawTrendRow(dc, w, rows[2], computeHrSlope());
+        drawCenteredText(dc, cx, rows[3], Graphics.FONT_XTINY, formatRmssd(computeRmssd()), C_MUTED);
 
         drawActionButton(dc, w, h, "AGAIN", C_DONE, C_BG);
     }
